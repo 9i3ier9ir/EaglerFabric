@@ -138,10 +138,43 @@ end</textarea></label>
       return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
     }
 
+    function normalizeMetadata(manifest, sourceLabel = 'fabric') {
+      const id = String(manifest.id || manifest.name || manifest.title || 'unnamed-mod').trim();
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) {
+        throw new Error('fabric.mod.json contains an invalid id');
+      }
+      const title = String(manifest.name || manifest.title || manifest.displayName || id).trim();
+      const description = String(manifest.description || '').replace(/[\r\n]+/g, ' ').trim();
+      const version = String(manifest.version || '1.0.0').trim();
+      return {
+        id,
+        name: title,
+        title,
+        description,
+        version,
+        source: sourceLabel,
+        format: 'raw-fabric'
+      };
+    }
+
     function encodeEbcString(value) {
       const data = new TextEncoder().encode(value);
       if (data.length > 4096) throw new Error('EBC string is too long');
       return [data.length >> 8, data.length & 255, ...data];
+    }
+
+    function encodeInt32LE(value) {
+      const number = Number(value) | 0;
+      return [(number >>> 24) & 255, (number >>> 16) & 255, (number >>> 8) & 255, number & 255];
+    }
+
+    function decodeJavaString(value) {
+      return value
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
     }
 
     function assembleEbc(source) {
@@ -163,6 +196,30 @@ end</textarea></label>
       }
       if (!ended) throw new Error('EBC source must end with: end');
       return new Uint8Array(bytes);
+    }
+
+    function parseJavaEbcCalls(source) {
+      const output = [];
+      const pushStringInstruction = (opcode, value) => output.push(opcode, ...encodeEbcString(String(value)));
+      const rules = [
+        { regex: /(EaglerMod|FMod)\.log\s*\(\s*(["'`])((?:\\.|(?!\2).)*)\2\s*\)\s*;/g, action: m => pushStringInstruction(1, decodeJavaString(m[3])) },
+        { regex: /(EaglerMod|FMod)\.registerCommand\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*\)\s*;/g, action: m => pushStringInstruction(2, m[3]) },
+        { regex: /(EaglerMod|FMod)\.registerEvent\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*\)\s*;/g, action: m => pushStringInstruction(6, m[3]) },
+        { regex: /(EaglerMod|FMod)\.registerConfig\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*,\s*(["'`])((?:\\.|(?!\4).)*)\4\s*\)\s*;/g, action: m => output.push(11, ...encodeEbcString(m[3]), ...encodeEbcString(decodeJavaString(m[5]))) },
+        { regex: /(EaglerMod|FMod)\.setConfig\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*,\s*(["'`])((?:\\.|(?!\4).)*)\4\s*\)\s*;/g, action: m => output.push(7, ...encodeEbcString(m[3]), ...encodeEbcString(decodeJavaString(m[5]))) },
+        { regex: /(EaglerMod|FMod)\.registerKeybind\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*,\s*(-?\d+)\s*\)\s*;/g, action: m => output.push(8, ...encodeEbcString(m[3]), ...encodeInt32LE(Number(m[5]))) },
+        { regex: /(EaglerMod|FMod)\.onKeyPressed\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*,\s*(-?\d+)\s*,\s*(true|false)\s*\)\s*;/g, action: m => output.push(9, ...encodeEbcString(m[3]), ...encodeInt32LE(Number(m[5])), m[6] === 'true' ? 1 : 0) },
+        { regex: /(EaglerMod|FMod)\.openScreen\s*\(\s*(["'`])([a-z0-9._-]+)\2\s*\)\s*;/g, action: m => pushStringInstruction(10, m[3]) },
+        { regex: /(EaglerMod|FMod)\.onTick\s*\(\s*\)\s*;/g, action: () => output.push(3) },
+        { regex: /(EaglerMod|FMod)\.onLoad\s*\(\s*\)\s*;/g, action: () => output.push(4) },
+        { regex: /(EaglerMod|FMod)\.onUnload\s*\(\s*\)\s*;/g, action: () => output.push(5) }
+      ];
+      for (const rule of rules) {
+        for (const match of source.matchAll(rule.regex)) {
+          rule.action(match);
+        }
+      }
+      return output;
     }
 
     function setMode(ebc) {
@@ -217,38 +274,31 @@ end</textarea></label>
         for (const name of Object.keys(input.files)) {
           if (!name.endsWith('.java') || !safeName(name)) continue;
           const source = await input.files[name].async('string');
-          const calls = /(EaglerMod|FMod)\.(log|registerCommand|onTick|onLoad|onUnload)\s*\(/g;
-          let match;
-          while ((match = calls.exec(source))) {
-            const rest = source.slice(match.index);
-            let parsed;
-            if (match[2] === 'log') parsed = rest.match(new RegExp('^' + match[1] + '\\.log\\s*\\(\\s*"((?:\\.|[^"\\])*)"\\s*\\)\\s*;'));
-            else if (match[2] === 'registerCommand') parsed = rest.match(new RegExp('^' + match[1] + '\\.registerCommand\\s*\\(\\s*"([a-z0-9._-]+)"\\s*\\)\\s*;'));
-            else if (match[2] === 'onTick') parsed = rest.match(new RegExp('^' + match[1] + '\\.onTick\\s*\\(\\s*\\)\\s*;'));
-            else if (match[2] === 'onLoad') parsed = rest.match(new RegExp('^' + match[1] + '\\.onLoad\\s*\\(\\s*\\)\\s*;'));
-            else parsed = rest.match(new RegExp('^' + match[1] + '\\.onUnload\\s*\\(\\s*\\)\\s*;'));
-            if (!parsed) throw new Error('Unsupported mod call in ' + name);
-            if (match[2] === 'log' || match[2] === 'registerCommand') {
-              const value = match[2] === 'log' ? parsed[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\').replace(/\\n/g, ' ') : parsed[1];
-              const data = new TextEncoder().encode(value);
-              if (data.length > 4096) throw new Error('EBC string is too long');
-              ebc.push(match[2] === 'log' ? 1 : 2, data.length >> 8, data.length & 255, ...data);
-            } else if (match[2] === 'onTick') ebc.push(3);
-            else if (match[2] === 'onLoad') ebc.push(4);
-            else ebc.push(5);
+          const calls = parseJavaEbcCalls(source);
+          if (calls.length > 0) {
+            ebc.push(...calls);
             found = true;
           }
         }
         if (!found) throw new Error('No supported FMod/EaglerMod calls found');
         ebc.push(0);
         const output = new JSZip();
-        const metadata = `id=${javaManifest.id}\ntitle=${String(javaManifest.name || javaManifest.id).replace(/[\r\n]/g, ' ')}\ndescription=${String(javaManifest.description || '').replace(/[\r\n]/g, ' ')}\nversion=${String(javaManifest.version || '1.0.0')}\nsource=fabric-java\nformat=ebc\n`;
-        output.file('mod.fbt', metadata);
+        const metadata = normalizeMetadata(javaManifest, 'fabric-java');
+        metadata.format = 'ebc';
+        output.file('mod.fbt', Object.entries({
+          id: metadata.id,
+          name: metadata.name,
+          title: metadata.title,
+          description: metadata.description,
+          version: metadata.version,
+          source: metadata.source,
+          format: metadata.format
+        }).map(([key, value]) => key + '=' + String(value).replace(/[\r\n]+/g, ' ') + '\n').join(''));
         output.file('payload/main.ebc.fbm', new Uint8Array(ebc));
         const blob = await output.generateAsync({ type: 'blob', compression: 'DEFLATE' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = javaManifest.id + '.fmod.zip';
+        link.download = metadata.id + '.fmod.zip';
         link.click();
         URL.revokeObjectURL(link.href);
         setStatus('Downloaded ' + link.download + '.');
@@ -293,15 +343,17 @@ end</textarea></label>
       try {
         const input = await JSZip.loadAsync(selectedFile);
         const output = new JSZip();
-        const metadata = {
-          id: manifest.id,
-          title: String(manifest.name || manifest.id),
-          description: String(manifest.description || '').replace(/[\r\n]/g, ' '),
-          version: String(manifest.version || '1.0.0'),
-          source: 'fabric',
-          format: Object.keys(input.files).some(name => name.endsWith('.ebc')) ? 'ebc' : 'raw-fabric'
-        };
-        output.file('mod.fbt', Object.entries(metadata).map(([key, value]) => key + '=' + value + '\n').join(''));
+        const metadata = normalizeMetadata(manifest, 'fabric');
+        metadata.format = Object.keys(input.files).some(name => name.endsWith('.ebc')) ? 'ebc' : 'raw-fabric';
+        output.file('mod.fbt', Object.entries({
+          id: metadata.id,
+          name: metadata.name,
+          title: metadata.title,
+          description: metadata.description,
+          version: metadata.version,
+          source: metadata.source,
+          format: metadata.format
+        }).map(([key, value]) => key + '=' + String(value).replace(/[\r\n]+/g, ' ') + '\n').join(''));
         let totalSize = 0;
         let payloadCount = 0;
         for (const name of Object.keys(input.files)) {
@@ -320,7 +372,7 @@ end</textarea></label>
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = manifest.id + '.fmod.zip';
+        link.download = metadata.id + '.fmod.zip';
         link.click();
         URL.revokeObjectURL(url);
         setStatus('Downloaded ' + link.download + (metadata.format === 'ebc' ? '.' : '. Raw Fabric bytecode is not executable yet.'));

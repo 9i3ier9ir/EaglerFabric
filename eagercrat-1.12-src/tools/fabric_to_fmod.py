@@ -28,25 +28,35 @@ def read_entry(archive, info):
     return data
 
 
+def normalize_metadata(manifest, source_name):
+    mod_id = str(manifest.get("id") or manifest.get("name") or manifest.get("title") or "unnamed-mod").strip()
+    if not mod_id or not mod_id.replace(".", "").replace("-", "").replace("_", "").isalnum() or "/" in mod_id:
+        raise ValueError("fabric.mod.json contains an invalid id")
+    title = str(manifest.get("name") or manifest.get("title") or manifest.get("displayName") or mod_id).strip()
+    description = str(manifest.get("description") or "").replace("\r", " ").replace("\n", " ")
+    version = str(manifest.get("version") or "1.0.0").strip()
+    return {
+        "id": mod_id,
+        "name": title,
+        "title": title,
+        "description": description,
+        "version": version,
+        "source": source_name,
+        "format": "raw-fabric",
+    }
+
+
 def convert(source, destination):
     with zipfile.ZipFile(source) as fabric:
         manifest = json.loads(read_entry(fabric, fabric.getinfo("fabric.mod.json")))
-        mod_id = manifest["id"]
-        if not isinstance(mod_id, str) or not mod_id or not safe_name(mod_id) or "/" in mod_id:
-            raise ValueError("fabric.mod.json contains an invalid id")
-        metadata = {
-            "id": mod_id,
-            "title": manifest.get("name", mod_id),
-            "description": manifest.get("description", ""),
-            "version": str(manifest.get("version", "1.0.0")),
-            "source": "fabric",
-        }
+        metadata = normalize_metadata(manifest, "fabric")
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as output:
             output.writestr("mod.fbt", "".join(
                 f"{key}={str(value).replace(chr(10), ' ').replace(chr(13), ' ')}\n"
                 for key, value in metadata.items()
             ))
             total_size = 0
+            payload_count = 0
             for info in fabric.infolist():
                 if info.is_dir() or not safe_name(info.filename) or info.filename == "fabric.mod.json":
                     continue
@@ -55,6 +65,9 @@ def convert(source, destination):
                 if total_size > MAX_TOTAL_SIZE:
                     raise ValueError("Fabric mod payload is too large")
                 output.writestr(f"payload/{info.filename}.fbm", data)
+                payload_count += 1
+            if payload_count == 0:
+                raise ValueError("Fabric mod archive contains no payload entries")
 
 
 def main():

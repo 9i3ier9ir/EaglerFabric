@@ -81,49 +81,72 @@ import java.nio.file.*;
 import java.util.regex.*;
 
 public class JavaToEbc {
-  private static final Pattern LOG = Pattern.compile("(?:EaglerMod|FMod)\\.log\\s*\\(\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"\\s*\\)\\s*;");
-  private static final Pattern COMMAND = Pattern.compile("(?:EaglerMod|FMod)\\.registerCommand\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*\\)\\s*;");
-  private static final Pattern REGISTER_KEYBIND = Pattern.compile("(?:EaglerMod|FMod)\\.registerKeybind\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*,\\s*(\\-?\\d+)\\s*\\)\\s*;");
-  private static final Pattern ON_KEY_PRESSED = Pattern.compile("(?:EaglerMod|FMod)\\.onKeyPressed\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*,\\s*(\\-?\\d+)\\s*,\\s*(true|false)\\s*\\)\\s*;");
-  private static final Pattern OPEN_SCREEN = Pattern.compile("(?:EaglerMod|FMod)\\.openScreen\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*\\)\\s*;");
-  private static final Pattern REGISTER_CONFIG = Pattern.compile("(?:EaglerMod|FMod)\\.registerConfig\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*,\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"\\s*\\)\\s*;");
+  private static final int MAX_STRING = 4096;
+  private static final ByteArrayOutputStream out = new ByteArrayOutputStream();
+  private static final Pattern LOG = Pattern.compile("(?:EaglerMod|FMod)\\.log\\s*\\(\\s*([\"'`])((?:\\\\.|(?!\\1).)*)\\1\\s*\\)\\s*;");
+  private static final Pattern COMMAND = Pattern.compile("(?:EaglerMod|FMod)\\.registerCommand\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*\\)\\s*;");
+  private static final Pattern REGISTER_KEYBIND = Pattern.compile("(?:EaglerMod|FMod)\\.registerKeybind\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*,\\s*(-?\\d+)\\s*\\)\\s*;");
+  private static final Pattern ON_KEY_PRESSED = Pattern.compile("(?:EaglerMod|FMod)\\.onKeyPressed\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*,\\s*(-?\\d+)\\s*,\\s*(true|false)\\s*\\)\\s*;");
+  private static final Pattern OPEN_SCREEN = Pattern.compile("(?:EaglerMod|FMod)\\.openScreen\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*\\)\\s*;");
+  private static final Pattern REGISTER_CONFIG = Pattern.compile("(?:EaglerMod|FMod)\\.registerConfig\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*,\\s*([\"'`])((?:\\\\.|(?!\\3).)*)\\3\\s*\\)\\s*;");
   private static final Pattern TICK = Pattern.compile("(?:EaglerMod|FMod)\\.onTick\\s*\\(\\s*\\)\\s*;");
   private static final Pattern LOAD = Pattern.compile("(?:EaglerMod|FMod)\\.onLoad\\s*\\(\\s*\\)\\s*;");
   private static final Pattern UNLOAD = Pattern.compile("(?:EaglerMod|FMod)\\.onUnload\\s*\\(\\s*\\)\\s*;");
-  private static final Pattern EVENT = Pattern.compile("(?:EaglerMod|FMod)\\.registerEvent\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*\\)\\s*;");
-  private static final Pattern SET_CONFIG = Pattern.compile("(?:EaglerMod|FMod)\\.setConfig\\s*\\(\\s*\\\"([a-z0-9._-]+)\\\"\\s*,\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"\\s*\\)\\s*;");
+  private static final Pattern REGISTER_EVENT = Pattern.compile("(?:EaglerMod|FMod)\\.registerEvent\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*\\)\\s*;");
+  private static final Pattern SET_CONFIG = Pattern.compile("(?:EaglerMod|FMod)\\.setConfig\\s*\\(\\s*([\"'`])([a-z0-9._-]+)\\1\\s*,\\s*([\"'`])((?:\\\\.|(?!\\3).)*)\\3\\s*\\)\\s*;");
   private static final Pattern CALL = Pattern.compile("(?:EaglerMod|FMod)\\.(?:log|registerCommand|registerKeybind|onKeyPressed|openScreen|registerConfig|onTick|onLoad|onUnload|registerEvent|setConfig)\\s*\\(");
-  private static final int MAX_STRING = 4096;
-  private static final ByteArrayOutputStream out = new ByteArrayOutputStream();
-  private static void string(String value) throws Exception {
+
+  private static void writeString(String value) throws Exception {
     byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
     if (bytes.length > MAX_STRING) throw new Exception("EBC string is too long");
-    out.write(bytes.length >>> 8); out.write(bytes.length & 255); out.write(bytes);
+    out.write((byte) (bytes.length >>> 8));
+    out.write((byte) (bytes.length & 255));
+    out.write(bytes);
   }
+
+  private static void writeInt32(int value) {
+    out.write((byte) (value >>> 24));
+    out.write((byte) ((value >>> 16) & 255));
+    out.write((byte) ((value >>> 8) & 255));
+    out.write((byte) (value & 255));
+  }
+
   private static String unescape(String value) {
-    return value.replace("\\\\\"", "\"").replace("\\\\\\\\", "\\").replace("\\\\n", " ");
+    return value.replace("\\\\\"", "\"").replace("\\\\", "\\").replace("\\n", " ");
   }
+
   public static void main(String[] args) throws Exception {
     out.write(new byte[] { 'E', 'B', 'C', '1', 1 });
     boolean found = false;
-    try (var paths = Files.walk(Paths.get(args[0]))) {
-      for (Path path : (Iterable<Path>) paths.filter(p -> p.toString().endsWith(".java"))::iterator) {
-        String source = Files.readString(path);
+    try (DirectoryStream<Path> stream = Files.newDirectoryStream(Paths.get(args[0]), "*.java")) {
+      for (Path path : stream) {
+        String source = Files.readString(path, StandardCharsets.UTF_8);
         Matcher calls = CALL.matcher(source);
         while (calls.find()) {
           String rest = source.substring(calls.start());
-          Matcher log = LOG.matcher(rest), command = COMMAND.matcher(rest), tick = TICK.matcher(rest), load = LOAD.matcher(rest), unload = UNLOAD.matcher(rest), event = EVENT.matcher(rest), setConfig = SET_CONFIG.matcher(rest);
-          if (log.lookingAt()) { out.write(1); string(unescape(log.group(1))); found = true; }
-          else if (command.lookingAt()) { out.write(2); string(command.group(1)); found = true; }
-          else if (registerKeybind.lookingAt()) { out.write(8); string(registerKeybind.group(1)); int value = Integer.parseInt(registerKeybind.group(2)); out.write((byte) (value >>> 24)); out.write((byte) ((value >>> 16) & 255)); out.write((byte) ((value >>> 8) & 255)); out.write((byte) (value & 255)); found = true; }
-          else if (onKeyPressed.lookingAt()) { out.write(9); string(onKeyPressed.group(1)); int value = Integer.parseInt(onKeyPressed.group(2)); out.write((byte) (value >>> 24)); out.write((byte) ((value >>> 16) & 255)); out.write((byte) ((value >>> 8) & 255)); out.write((byte) (value & 255)); out.write(Boolean.parseBoolean(onKeyPressed.group(3)) ? 1 : 0); found = true; }
-          else if (openScreen.lookingAt()) { out.write(10); string(openScreen.group(1)); found = true; }
-          else if (registerConfig.lookingAt()) { out.write(11); string(registerConfig.group(1)); string(unescape(registerConfig.group(2))); found = true; }
+          Matcher log = LOG.matcher(rest);
+          Matcher command = COMMAND.matcher(rest);
+          Matcher registerKeybind = REGISTER_KEYBIND.matcher(rest);
+          Matcher onKeyPressed = ON_KEY_PRESSED.matcher(rest);
+          Matcher openScreen = OPEN_SCREEN.matcher(rest);
+          Matcher registerConfig = REGISTER_CONFIG.matcher(rest);
+          Matcher tick = TICK.matcher(rest);
+          Matcher load = LOAD.matcher(rest);
+          Matcher unload = UNLOAD.matcher(rest);
+          Matcher registerEvent = REGISTER_EVENT.matcher(rest);
+          Matcher setConfig = SET_CONFIG.matcher(rest);
+
+          if (log.lookingAt()) { out.write(1); writeString(unescape(log.group(2))); found = true; }
+          else if (command.lookingAt()) { out.write(2); writeString(command.group(2)); found = true; }
+          else if (registerKeybind.lookingAt()) { out.write(8); writeString(registerKeybind.group(2)); writeInt32(Integer.parseInt(registerKeybind.group(3))); found = true; }
+          else if (onKeyPressed.lookingAt()) { out.write(9); writeString(onKeyPressed.group(2)); writeInt32(Integer.parseInt(onKeyPressed.group(3))); out.write(onKeyPressed.group(4).equals("true") ? 1 : 0); found = true; }
+          else if (openScreen.lookingAt()) { out.write(10); writeString(openScreen.group(2)); found = true; }
+          else if (registerConfig.lookingAt()) { out.write(11); writeString(registerConfig.group(2)); writeString(unescape(registerConfig.group(4))); found = true; }
           else if (tick.lookingAt()) { out.write(3); found = true; }
           else if (load.lookingAt()) { out.write(4); found = true; }
           else if (unload.lookingAt()) { out.write(5); found = true; }
-          else if (event.lookingAt()) { out.write(6); string(event.group(1)); found = true; }
-          else if (setConfig.lookingAt()) { out.write(7); string(setConfig.group(1)); string(unescape(setConfig.group(2))); found = true; }
+          else if (registerEvent.lookingAt()) { out.write(6); writeString(registerEvent.group(2)); found = true; }
+          else if (setConfig.lookingAt()) { out.write(7); writeString(setConfig.group(2)); writeString(unescape(setConfig.group(4))); found = true; }
           else throw new Exception("unsupported mod call in " + path);
         }
       }
