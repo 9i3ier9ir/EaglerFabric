@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fabric to Eagler Mod Converter</title>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    :root { color-scheme: dark; --bg: #111820; --panel: #1c2731; --line: #344654; --text: #edf4f7; --muted: #a8bac3; --accent: #69d2a0; --danger: #ff897d; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 20% 10%, #243746, var(--bg) 52%); color: var(--text); font: 16px/1.5 Georgia, serif; }
+    main { width: min(680px, 100%); padding: 32px; border: 1px solid var(--line); background: rgba(28, 39, 49, .94); box-shadow: 0 20px 60px #0008; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.8rem, 5vw, 3rem); font-weight: 500; letter-spacing: 0; }
+    p { color: var(--muted); }
+    .drop { display: grid; place-items: center; min-height: 190px; margin: 28px 0 18px; border: 2px dashed var(--line); text-align: center; cursor: pointer; transition: border-color .2s, background .2s; }
+    .drop:hover, .drop.over { border-color: var(--accent); background: #69d2a012; }
+    .drop strong { display: block; color: var(--text); font-size: 1.2rem; }
+    input { display: none; }
+    button { border: 0; padding: 11px 18px; background: var(--accent); color: #102119; font: inherit; font-weight: bold; cursor: pointer; }
+    button:disabled { cursor: wait; opacity: .55; }
+    #status { min-height: 28px; margin-top: 18px; color: var(--accent); }
+    #status.error { color: var(--danger); }
+    .details { display: none; padding: 14px 16px; border-left: 3px solid var(--accent); background: #101820; }
+    .details.visible { display: block; }
+    .mode { display: flex; gap: 8px; margin: 24px 0 16px; }
+    .mode button { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+    .mode button.active { border-color: var(--accent); color: var(--accent); }
+    .panel { display: none; }
+    .panel.visible { display: block; }
+    label.field { display: block; margin: 12px 0; color: var(--muted); }
+    label.field input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; border: 1px solid var(--line); background: #101820; color: var(--text); font: inherit; }
+    textarea { min-height: 150px; resize: vertical; font-family: monospace; }
+    .hint { font-size: .9rem; }
+    code { color: #c8f3de; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Fabric to Eagler</h1>
+    <p>Create an executable Eagler bytecode mod or package an existing Fabric JAR into a <code>.fmod.zip</code>.</p>
+    <div class="mode">
+      <button id="jarMode" class="active" type="button">Fabric JAR</button>
+      <button id="javaMode" type="button">Java source ZIP</button>
+      <button id="ebcMode" type="button">EBC mod</button>
+    </div>
+    <section id="jarPanel" class="panel visible">
+      <label class="drop" id="drop" for="file">
+        <span><strong>Drop a Fabric JAR here</strong>or choose one from your device</span>
+        <input id="file" type="file" accept=".jar,application/java-archive,application/zip">
+      </label>
+      <div class="details" id="details"></div>
+      <button id="convert" type="button" disabled>Convert and download</button>
+    </section>
+    <section id="javaPanel" class="panel">
+      <label class="drop" id="javaDrop" for="javaFile">
+        <span><strong>Drop a Java source ZIP here</strong>or choose one from your device</span>
+        <input id="javaFile" type="file" accept=".zip,application/zip">
+      </label>
+      <div class="details" id="javaDetails"></div>
+      <p class="hint">The ZIP must contain <code>fabric.mod.json</code>. Java sources may use the supported EaglerMod calls.</p>
+      <button id="convertJava" type="button" disabled>Translate to EBC and download</button>
+    </section>
+    <section id="ebcPanel" class="panel">
+      <label class="field">Mod ID<input id="ebcId" value="example-mod" maxlength="64" autocomplete="off"></label>
+      <label class="field">Title<input id="ebcTitle" value="Example Mod" maxlength="128" autocomplete="off"></label>
+      <label class="field">Version<input id="ebcVersion" value="1.0.0" maxlength="64" autocomplete="off"></label>
+      <label class="field">Description<input id="ebcDescription" value="An Eagler bytecode mod." maxlength="512" autocomplete="off"></label>
+      <label class="field">Instructions<textarea id="ebcSource" spellcheck="false">log Hello from my mod
+command greet
+tick
+end</textarea></label>
+      <p class="hint"><code>log message</code>, <code>command name</code>, <code>tick</code>, and <code>end</code> are supported.</p>
+      <button id="createEbc" type="button">Create and download</button>
+    </section>
+    <div id="status" role="status"></div>
+  </main>
+  <script>
+    const MAX_ENTRY_SIZE = 16 * 1024 * 1024;
+    const MAX_TOTAL_SIZE = 128 * 1024 * 1024;
+    const fileInput = document.getElementById('file');
+    const drop = document.getElementById('drop');
+    const convertButton = document.getElementById('convert');
+    const createEbcButton = document.getElementById('createEbc');
+    const jarMode = document.getElementById('jarMode');
+    const javaMode = document.getElementById('javaMode');
+    const ebcMode = document.getElementById('ebcMode');
+    const jarPanel = document.getElementById('jarPanel');
+    const javaPanel = document.getElementById('javaPanel');
+    const ebcPanel = document.getElementById('ebcPanel');
+    const javaFileInput = document.getElementById('javaFile');
+    const javaDrop = document.getElementById('javaDrop');
+    const javaDetails = document.getElementById('javaDetails');
+    const convertJavaButton = document.getElementById('convertJava');
+    const status = document.getElementById('status');
+    const details = document.getElementById('details');
+    let selectedFile = null;
+    let manifest = null;
+    let selectedJavaFile = null;
+    let javaManifest = null;
+
+    function safeName(name) {
+      return name && !name.startsWith('/') && !name.includes('\\') &&
+        name.split('/').every(part => part && part !== '.' && part !== '..');
+    }
+
+    function setStatus(message, error = false) {
+      status.textContent = message;
+      status.className = error ? 'error' : '';
+    }
+
+    async function inspect(file) {
+      selectedFile = null;
+      manifest = null;
+      convertButton.disabled = true;
+      details.className = 'details';
+      setStatus('Reading ' + file.name + '...');
+      try {
+        const archive = await JSZip.loadAsync(file);
+        const entry = archive.file('fabric.mod.json');
+        if (!entry) throw new Error('fabric.mod.json is missing');
+        manifest = JSON.parse(await entry.async('string'));
+        if (typeof manifest.id !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(manifest.id)) {
+          throw new Error('fabric.mod.json contains an invalid id');
+        }
+        selectedFile = file;
+        details.innerHTML = '<strong>' + escapeHtml(String(manifest.name || manifest.id)) + '</strong> ' +
+          escapeHtml(String(manifest.version || '1.0.0')) + '<br><small>' +
+          escapeHtml(String(manifest.description || 'No description')) + '</small>';
+        details.className = 'details visible';
+        convertButton.disabled = false;
+        setStatus('Ready to convert.');
+      } catch (error) {
+        setStatus(error.message || 'Could not read the Fabric JAR.', true);
+      }
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+    }
+
+    function encodeEbcString(value) {
+      const data = new TextEncoder().encode(value);
+      if (data.length > 4096) throw new Error('EBC string is too long');
+      return [data.length >> 8, data.length & 255, ...data];
+    }
+
+    function assembleEbc(source) {
+      const bytes = [69, 66, 67, 49, 1];
+      let instructions = 0;
+      let ended = false;
+      for (const [index, rawLine] of source.split(/\r?\n/).entries()) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        if (++instructions > 4096) throw new Error('Too many EBC instructions');
+        const space = line.indexOf(' ');
+        const command = space < 0 ? line : line.slice(0, space);
+        const argument = space < 0 ? '' : line.slice(space + 1);
+        if (command === 'log' && argument) bytes.push(1, ...encodeEbcString(argument));
+        else if (command === 'command' && argument && !argument.includes(' ')) bytes.push(2, ...encodeEbcString(argument));
+        else if (command === 'tick' && !argument) bytes.push(3);
+        else if (command === 'end' && !argument) { bytes.push(0); ended = true; }
+        else throw new Error('Invalid EBC instruction on line ' + (index + 1));
+      }
+      if (!ended) throw new Error('EBC source must end with: end');
+      return new Uint8Array(bytes);
+    }
+
+    function setMode(ebc) {
+      setPanelMode(ebc ? 'ebc' : 'jar');
+      setStatus('');
+    }
+
+    function setPanelMode(mode) {
+      jarMode.className = mode === 'jar' ? 'active' : '';
+      javaMode.className = mode === 'java' ? 'active' : '';
+      ebcMode.className = mode === 'ebc' ? 'active' : '';
+      jarPanel.className = mode === 'jar' ? 'panel visible' : 'panel';
+      javaPanel.className = mode === 'java' ? 'panel visible' : 'panel';
+      ebcPanel.className = mode === 'ebc' ? 'panel visible' : 'panel';
+    }
+
+    async function inspectJava(file) {
+      selectedJavaFile = null;
+      javaManifest = null;
+      convertJavaButton.disabled = true;
+      javaDetails.className = 'details';
+      setStatus('Reading ' + file.name + '...');
+      try {
+        const archive = await JSZip.loadAsync(file);
+        const entry = archive.file('fabric.mod.json');
+        if (!entry) throw new Error('fabric.mod.json is missing');
+        javaManifest = JSON.parse(await entry.async('string'));
+        if (typeof javaManifest.id !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(javaManifest.id)) {
+          throw new Error('fabric.mod.json contains an invalid id');
+        }
+        const sources = Object.keys(archive.files).filter(name => name.endsWith('.java') && safeName(name));
+        if (!sources.length) throw new Error('The source ZIP has no safe .java files');
+        selectedJavaFile = file;
+        javaDetails.innerHTML = '<strong>' + escapeHtml(String(javaManifest.name || javaManifest.id)) + '</strong> ' +
+          escapeHtml(String(javaManifest.version || '1.0.0')) + '<br><small>' + sources.length + ' Java source file(s)</small>';
+        javaDetails.className = 'details visible';
+        convertJavaButton.disabled = false;
+        setStatus('Ready to translate to EBC.');
+      } catch (error) {
+        setStatus(error.message || 'Could not read the Java source ZIP.', true);
+      }
+    }
+
+    async function convertJava() {
+      if (!selectedJavaFile || !javaManifest) return;
+      convertJavaButton.disabled = true;
+      setStatus('Translating Java sources to EBC...');
+      try {
+        const input = await JSZip.loadAsync(selectedJavaFile);
+        const ebc = [69, 66, 67, 49, 1];
+        let found = false;
+        for (const name of Object.keys(input.files)) {
+          if (!name.endsWith('.java') || !safeName(name)) continue;
+          const source = await input.files[name].async('string');
+          const calls = /(EaglerMod|FMod)\.(log|registerCommand|onTick|onLoad|onUnload)\s*\(/g;
+          let match;
+          while ((match = calls.exec(source))) {
+            const rest = source.slice(match.index);
+            let parsed;
+            if (match[2] === 'log') parsed = rest.match(new RegExp('^' + match[1] + '\\.log\\s*\\(\\s*"((?:\\.|[^"\\])*)"\\s*\\)\\s*;'));
+            else if (match[2] === 'registerCommand') parsed = rest.match(new RegExp('^' + match[1] + '\\.registerCommand\\s*\\(\\s*"([a-z0-9._-]+)"\\s*\\)\\s*;'));
+            else if (match[2] === 'onTick') parsed = rest.match(new RegExp('^' + match[1] + '\\.onTick\\s*\\(\\s*\\)\\s*;'));
+            else if (match[2] === 'onLoad') parsed = rest.match(new RegExp('^' + match[1] + '\\.onLoad\\s*\\(\\s*\\)\\s*;'));
+            else parsed = rest.match(new RegExp('^' + match[1] + '\\.onUnload\\s*\\(\\s*\\)\\s*;'));
+            if (!parsed) throw new Error('Unsupported mod call in ' + name);
+            if (match[2] === 'log' || match[2] === 'registerCommand') {
+              const value = match[2] === 'log' ? parsed[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\').replace(/\\n/g, ' ') : parsed[1];
+              const data = new TextEncoder().encode(value);
+              if (data.length > 4096) throw new Error('EBC string is too long');
+              ebc.push(match[2] === 'log' ? 1 : 2, data.length >> 8, data.length & 255, ...data);
+            } else if (match[2] === 'onTick') ebc.push(3);
+            else if (match[2] === 'onLoad') ebc.push(4);
+            else ebc.push(5);
+            found = true;
+          }
+        }
+        if (!found) throw new Error('No supported FMod/EaglerMod calls found');
+        ebc.push(0);
+        const output = new JSZip();
+        const metadata = `id=${javaManifest.id}\ntitle=${String(javaManifest.name || javaManifest.id).replace(/[\r\n]/g, ' ')}\ndescription=${String(javaManifest.description || '').replace(/[\r\n]/g, ' ')}\nversion=${String(javaManifest.version || '1.0.0')}\nsource=fabric-java\nformat=ebc\n`;
+        output.file('mod.fbt', metadata);
+        output.file('payload/main.ebc.fbm', new Uint8Array(ebc));
+        const blob = await output.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = javaManifest.id + '.fmod.zip';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        setStatus('Downloaded ' + link.download + '.');
+      } catch (error) {
+        setStatus(error.message || 'Java translation failed.', true);
+      } finally {
+        convertJavaButton.disabled = false;
+      }
+    }
+
+    async function createEbc() {
+      createEbcButton.disabled = true;
+      setStatus('Building EBC package...');
+      try {
+        const id = document.getElementById('ebcId').value.trim();
+        const title = document.getElementById('ebcTitle').value.trim();
+        const version = document.getElementById('ebcVersion').value.trim();
+        const description = document.getElementById('ebcDescription').value.trim().replace(/[\r\n]/g, ' ');
+        if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error('Invalid mod ID');
+        if (!title || !version) throw new Error('Title and version are required');
+        const output = new JSZip();
+        output.file('mod.fbt', `id=${id}\ntitle=${title}\ndescription=${description}\nversion=${version}\nsource=eagler\nformat=ebc\n`);
+        output.file('payload/main.ebc.fbm', assembleEbc(document.getElementById('ebcSource').value));
+        const blob = await output.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = id + '.fmod.zip';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        setStatus('Downloaded ' + link.download + '.');
+      } catch (error) {
+        setStatus(error.message || 'EBC creation failed.', true);
+      } finally {
+        createEbcButton.disabled = false;
+      }
+    }
+
+    async function convert() {
+      if (!selectedFile || !manifest) return;
+      convertButton.disabled = true;
+      setStatus('Building package...');
+      try {
+        const input = await JSZip.loadAsync(selectedFile);
+        const output = new JSZip();
+        const metadata = {
+          id: manifest.id,
+          title: String(manifest.name || manifest.id),
+          description: String(manifest.description || '').replace(/[\r\n]/g, ' '),
+          version: String(manifest.version || '1.0.0'),
+          source: 'fabric',
+          format: Object.keys(input.files).some(name => name.endsWith('.ebc')) ? 'ebc' : 'raw-fabric'
+        };
+        output.file('mod.fbt', Object.entries(metadata).map(([key, value]) => key + '=' + value + '\n').join(''));
+        let totalSize = 0;
+        let payloadCount = 0;
+        for (const name of Object.keys(input.files)) {
+          const entry = input.files[name];
+          if (entry.dir || name === 'fabric.mod.json') continue;
+          if (!safeName(name)) continue;
+          const data = await entry.async('uint8array');
+          if (data.byteLength > MAX_ENTRY_SIZE || (totalSize += data.byteLength) > MAX_TOTAL_SIZE) {
+            throw new Error('Fabric mod payload is too large');
+          }
+          output.file('payload/' + name + '.fbm', data);
+          payloadCount++;
+        }
+        if (!payloadCount) throw new Error('The Fabric JAR has no payload files');
+        const blob = await output.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = manifest.id + '.fmod.zip';
+        link.click();
+        URL.revokeObjectURL(url);
+        setStatus('Downloaded ' + link.download + (metadata.format === 'ebc' ? '.' : '. Raw Fabric bytecode is not executable yet.'));
+      } catch (error) {
+        setStatus(error.message || 'Conversion failed.', true);
+      } finally {
+        convertButton.disabled = false;
+      }
+    }
+
+    fileInput.addEventListener('change', () => fileInput.files[0] && inspect(fileInput.files[0]));
+    ['dragenter', 'dragover'].forEach(type => drop.addEventListener(type, event => { event.preventDefault(); drop.classList.add('over'); }));
+    ['dragleave', 'drop'].forEach(type => drop.addEventListener(type, event => { event.preventDefault(); drop.classList.remove('over'); }));
+    drop.addEventListener('drop', event => event.dataTransfer.files[0] && inspect(event.dataTransfer.files[0]));
+    javaFileInput.addEventListener('change', () => javaFileInput.files[0] && inspectJava(javaFileInput.files[0]));
+    ['dragenter', 'dragover'].forEach(type => javaDrop.addEventListener(type, event => { event.preventDefault(); javaDrop.classList.add('over'); }));
+    ['dragleave', 'drop'].forEach(type => javaDrop.addEventListener(type, event => { event.preventDefault(); javaDrop.classList.remove('over'); }));
+    javaDrop.addEventListener('drop', event => event.dataTransfer.files[0] && inspectJava(event.dataTransfer.files[0]));
+    convertButton.addEventListener('click', convert);
+    jarMode.addEventListener('click', () => setMode(false));
+    javaMode.addEventListener('click', () => setPanelMode('java'));
+    ebcMode.addEventListener('click', () => setMode(true));
+    createEbcButton.addEventListener('click', createEbc);
+    convertJavaButton.addEventListener('click', convertJava);
+  </script>
+</body>
+</html>
